@@ -1,0 +1,12 @@
+[workspace]
+resolver = "2"
+members = [
+    "onyx_inference",
+    "onyx_hal",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+authors = ["OnyxOS Team"]

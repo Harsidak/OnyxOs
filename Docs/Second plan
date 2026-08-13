@@ -1,0 +1,554 @@
+# OnyxOS v2 — Stripped Linux + AI-Native Kernel
+
+> **Pivot:** Instead of a userspace-only framework, we're building a **real operating system** by stripping Linux down to its bones and replacing the core subsystems with AI-native equivalents.
+
+## The Vision
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│  Traditional Linux          →    OnyxOS                     │
+├─────────────────────────────────────────────────────────────┤
+│  systemd (PID 1)            →    onyx-init (Rust)           │
+│  CFS scheduler              →    onyx_sched (market auction)│
+│  cgroups (manual)           →    auto-cgroups (per agent)   │
+│  apt/dnf packages           →    agent registry (hot-load)  │
+│  top/htop                   →    onyx-hud (market dashboard)│
+│  /var/log                   →    event stream (structured)  │
+│  X11/Wayland                →    AR overlay (future)        │
+│  bash                       →    voice + LLM shell          │
+└─────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## Architecture: The 4 Layers of OnyxOS
+
+```
+┌──────────────────────────────────────────────────────────┐
+│                    LAYER 3: AGENTS                       │
+│  ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────┐   │
+│  │ Emotion  │ │  Voice   │ │  World   │ │  Loop    │   │
+│  │ (RT_HARD)│ │ (RT_SOFT)│ │  Model   │ │   (BG)   │   │
+│  │          │ │          │ │ (RT_SOFT) │ │          │   │
+│  └────┬─────┘ └────┬─────┘ └────┬─────┘ └────┬─────┘   │
+│       │             │            │             │         │
+├───────┴─────────────┴────────────┴─────────────┴─────────┤
+│                    LAYER 2: ONYXD                         │
+│  The central daemon — replaces systemd as the brain      │
+│  ┌─────────────┐ ┌──────────────┐ ┌──────────────────┐  │
+│  │ Agent       │ │ Lagrangian   │ │ Inference        │  │
+│  │ Registry &  │ │ Market       │ │ Engine           │  │
+│  │ Lifecycle   │ │ Auction      │ │ (llama.cpp/CUDA) │  │
+│  └──────┬──────┘ └──────┬───────┘ └────────┬─────────┘  │
+│         │               │                  │             │
+│  ┌──────┴──────┐ ┌──────┴───────┐ ┌───────┴──────────┐  │
+│  │ cgroup      │ │ Thermal      │ │ Quant            │  │
+│  │ Controller  │ │ Governor     │ │ Ladder           │  │
+│  └─────────────┘ └──────────────┘ └──────────────────┘  │
+├──────────────────────────────────────────────────────────┤
+│                    LAYER 1: ONYX-INIT                    │
+│  Custom PID 1 (Rust) — minimal, fast, deterministic     │
+│  ┌─────────────┐ ┌──────────────┐ ┌──────────────────┐  │
+│  │ Mount       │ │ cgroup v2    │ │ Launch           │  │
+│  │ filesystems │ │ hierarchy    │ │ OnyxD            │  │
+│  └─────────────┘ └──────────────┘ └──────────────────┘  │
+├──────────────────────────────────────────────────────────┤
+│                    LAYER 0: STRIPPED LINUX KERNEL         │
+│  L4T Kernel 5.15 (NVIDIA Jetson) — stripped config      │
+│  ┌─────────────┐ ┌──────────────┐ ┌──────────────────┐  │
+│  │ NVIDIA GPU  │ │ Thermal      │ │ onyx_sched.ko    │  │
+│  │ driver      │ │ zones + INA  │ │ (kernel module)  │  │
+│  │ (CUDA 12.x) │ │ 3221 power   │ │ market scheduler │  │
+│  └─────────────┘ └──────────────┘ └──────────────────┘  │
+├──────────────────────────────────────────────────────────┤
+│  NVIDIA Jetson Orin Nano Super                           │
+│  8GB LPDDR5 | 1024 CUDA | 67 TOPS | 7-25W              │
+└──────────────────────────────────────────────────────────┘
+```
+
+---
+
+## What Gets Stripped vs. What Stays
+
+### ❌ REMOVED from stock L4T Ubuntu
+| Component | Why removed |
+|-----------|-------------|
+| systemd | Replaced by `onyx-init` — 100x lighter, boots in <1s |
+| NetworkManager | Replaced by minimal `wpa_supplicant` + `dhcpcd` |
+| snapd, cloud-init | Bloat — not needed on embedded |
+| X11 / Wayland / GNOME | No display server — HUD is direct framebuffer or SSH TUI |
+| apt / dpkg | Agents are the new "packages" — hot-loaded, not installed |
+| journald / rsyslog | Replaced by structured event stream |
+| cron, at | OnyxD handles all scheduling |
+| man pages, locales, docs | Space savings (~200MB) |
+| Unused kernel modules | Custom `.config` strips unused drivers |
+
+### ✅ KEPT (essential for AI inference)
+| Component | Why kept |
+|-----------|---------|
+| Linux kernel 5.15 (L4T) | NVIDIA GPU driver compatibility |
+| NVIDIA kernel modules | GPU compute (CUDA, cuDNN, TensorRT) |
+| cgroups v2 | Resource isolation per agent |
+| `/proc`, `/sys`, `/dev` | Hardware monitoring (thermal, power) |
+| BusyBox | Minimal shell + core utils for debugging |
+| `wpa_supplicant` | WiFi connectivity |
+| `openssh-server` | Remote access for development |
+| `libcuda`, `libnvrtc` | CUDA runtime for inference |
+
+### Target Rootfs Size
+| Image | Size |
+|-------|------|
+| Stock L4T Ubuntu | ~12 GB |
+| **OnyxOS rootfs** | **~800 MB** (kernel + CUDA + agents) |
+
+---
+
+## Proposed Changes
+
+### Phase 1: Stripped Linux Base (Buildroot)
+
+#### [NEW] `build/` — Buildroot configuration
+
+```
+build/
+├── buildroot/
+│   ├── configs/
+│   │   └── onyxos_jetson_orin_defconfig   # Buildroot board defconfig
+│   ├── overlay/                            # Rootfs overlay
+│   │   ├── etc/
+│   │   │   ├── inittab                     # BusyBox init → launch onyx-init
+│   │   │   ├── hostname                    # "onyxos"
+│   │   │   └── onyx/
+│   │   │       ├── system.toml             # OnyxOS system config
+│   │   │       └── agents/                 # Agent manifests
+│   │   └── init.d/
+│   │       └── S99onyx                     # Init script → starts onyx-init
+│   └── packages/
+│       ├── onyx-init/                      # Custom Buildroot package
+│       ├── onyxd/                          # OnyxD daemon package
+│       └── onyx-agents/                    # Built-in agents package
+├── kernel/
+│   ├── onyxos_kernel_defconfig             # Stripped kernel .config
+│   └── patches/
+│       └── 0001-onyx-sched-hook.patch      # Scheduler hook patch
+└── scripts/
+    ├── build.sh                            # One-command build
+    ├── flash_jetson.sh                     # Flash to Jetson
+    └── qemu_test.sh                        # Test in QEMU (x86_64)
+```
+
+#### [NEW] `build/kernel/onyxos_kernel_defconfig`
+Stripped kernel config — key decisions:
+- **ENABLED**: `CGROUPS`, `CGROUP_SCHED`, `CFS_BANDWIDTH`, `THERMAL`, `INA3221`, `NVIDIA_GPU`, `CUDA`, `USB`, `MMC`, `I2C`, `SPI`, `GPIO`
+- **DISABLED**: `SOUND`, `BLUETOOTH` (if not needed), `INFINIBAND`, `WIRELESS` (keep only needed drivers), `HAMRADIO`, `MEDIA_SUPPORT` (except camera), most `FS_*` (keep ext4, tmpfs, proc, sys, devtmpfs)
+- **CUSTOM**: `onyx_sched` kernel module hooks
+
+---
+
+### Phase 2: onyx-init — Custom PID 1 (Rust)
+
+#### [NEW] `onyx-init/` — The first process
+
+```
+onyx-init/
+├── Cargo.toml
+└── src/
+    └── main.rs
+```
+
+`onyx-init` is a minimal Rust binary that replaces systemd as PID 1:
+
+1. **Mount essential filesystems**: `/proc`, `/sys`, `/dev`, `/tmp`, `/run`
+2. **Set up cgroup v2 hierarchy**: Create `/sys/fs/cgroup/onyx/` with per-class subtrees:
+   - `/sys/fs/cgroup/onyx/rt_hard/` — guaranteed resources
+   - `/sys/fs/cgroup/onyx/rt_soft/` — elastic resources
+   - `/sys/fs/cgroup/onyx/bg/` — best-effort resources
+3. **Initialize thermal monitoring**: Open thermal zone sysfs handles
+4. **Load `onyx_sched.ko`**: Insert the custom scheduler kernel module
+5. **Configure network**: Start `wpa_supplicant` + `dhcpcd` (if WiFi configured)
+6. **Launch OnyxD**: Fork + exec the main daemon
+7. **Reap zombies**: Act as PID 1 zombie reaper
+8. **Handle signals**: `SIGTERM` → graceful shutdown, `SIGUSR1` → reload config
+
+**Target boot time**: < 2 seconds from kernel → OnyxD ready.
+
+---
+
+### Phase 3: onyx_sched.ko — Kernel Scheduler Module
+
+#### [NEW] `onyx-sched/` — Kernel module
+
+```
+onyx-sched/
+├── Makefile
+├── onyx_sched.c          # Main kernel module
+├── onyx_sched.h          # Shared structs with userspace
+└── onyx_sched_ioctl.h    # ioctl interface for OnyxD
+```
+
+> [!IMPORTANT]
+> The Jetson kernel is 5.15 — no `sched_ext` support (requires 6.12+).
+> Instead, we implement a **userspace-assisted scheduler** via:
+> 1. A kernel module that exposes agent priority/cgroup controls via `ioctl`
+> 2. OnyxD in userspace runs the Lagrangian auction and pushes decisions to the module
+> 3. The module enforces CPU affinity, nice values, and cgroup bandwidth throttling
+
+**How it works:**
+```
+OnyxD (userspace)                    onyx_sched.ko (kernel)
+    │                                      │
+    │  1. Run Lagrangian auction            │
+    │  2. Compute: ADMIT/SUSPEND/EVICT     │
+    │                                      │
+    ├──── ioctl(ONYX_SET_AGENT_STATE) ────→│
+    │     { agent_pid, state, cpu_shares,  │
+    │       mem_limit, nice_value }        │
+    │                                      │
+    │                              3. Set cgroup params
+    │                              4. Adjust nice value
+    │                              5. Set CPU affinity
+    │                              6. Apply mem.max
+    │                                      │
+    │←──── ioctl(ONYX_GET_METRICS) ────────│
+    │     { cpu_usage, mem_usage,          │
+    │       context_switches, thermals }   │
+```
+
+**Key ioctl commands:**
+- `ONYX_REGISTER_AGENT` — Register a new agent PID with the scheduler
+- `ONYX_SET_AGENT_STATE` — Update agent state (running/suspended/evicted)
+- `ONYX_SET_RESOURCE_LIMITS` — Set cgroup limits (CPU shares, mem.max, GPU partition)
+- `ONYX_GET_METRICS` — Read per-agent resource consumption
+- `ONYX_GET_THERMALS` — Read all thermal zones in one syscall
+- `ONYX_EMERGENCY_THROTTLE` — Immediate power reduction
+
+---
+
+### Phase 4: OnyxD — The Central Daemon (Rust + Cython)
+
+#### [NEW] `onyxd/` — The brain of OnyxOS
+
+```
+onyxd/
+├── Cargo.toml                    # Rust workspace member
+├── src/
+│   ├── main.rs                   # Daemon entry point
+│   ├── config.rs                 # Parse /etc/onyx/system.toml
+│   ├── thermal.rs                # Thermal governor (reads sysfs)
+│   ├── power.rs                  # Power monitor (INA3221)
+│   ├── cgroup.rs                 # cgroup v2 controller
+│   └── ipc.rs                    # Unix socket IPC for agents
+├── market/                       # The market scheduler (Cython)
+│   ├── __init__.py
+│   ├── auction.pyx               # Lagrangian auction engine
+│   ├── quant_ladder.pyx          # Quantization ladder
+│   └── agent_itd.py              # Agent ITD (unchanged from v1)
+├── inference/
+│   ├── __init__.py
+│   ├── engine.py                 # llama-cpp-python wrapper (dev)
+│   └── engine_rs.pyi             # Type stubs for Rust engine (prod)
+└── hud/
+    ├── __init__.py
+    └── dashboard.py              # Rich/Textual TUI (from v1)
+```
+
+**OnyxD lifecycle:**
+1. Parse `/etc/onyx/system.toml` — load hardware config + agent manifests
+2. Open `/dev/onyx_sched` — connect to kernel module
+3. Start thermal monitor thread — poll thermal zones at 10Hz
+4. Start power monitor thread — poll INA3221 at 5Hz
+5. Load inference engine — initialize llama.cpp with CUDA
+6. Start agent registry — scan `/etc/onyx/agents/` for manifests
+7. Start market ticker — run Lagrangian auction at 1Hz
+8. Start IPC server — listen on `/run/onyx/onyxd.sock` for agent connections
+9. Start HUD server — expose dashboard on localhost:8080 or terminal
+
+---
+
+### Phase 5: Agent System
+
+#### [NEW] Agent manifest format (`/etc/onyx/agents/*.toml`)
+
+```toml
+# /etc/onyx/agents/emotion.toml
+[agent]
+name = "emotion_rt"
+class = "RT_HARD"
+description = "Real-time emotion detection from camera"
+binary = "/opt/onyx/agents/emotion_agent"
+model = "/opt/onyx/models/emotion-v1.gguf"
+
+[resources]
+base_utility = 100
+power_watts = 5.0
+ram_mb = 1024
+gpu_tops = 8.0
+is_rigid = true
+
+[quantization]
+levels = ["FP16", "INT8"]  # Only these levels supported
+utility_exponent = 0.5
+
+[inputs]
+camera = true
+microphone = false
+
+[outputs]
+emotion_label = "string"
+confidence = "float"
+```
+
+#### [NEW] `agents/` — Built-in agents
+
+```
+agents/
+├── base_agent.py             # Abstract base with IPC to OnyxD
+├── emotion_agent.py          # RT_HARD — camera → emotion
+├── voice_agent.py            # RT_SOFT — mic → NLU → LLM → TTS
+├── world_model_agent.py      # RT_SOFT — camera → spatial map
+└── loop_agent.py             # BG — background reasoning
+```
+
+Each agent:
+1. Connects to OnyxD via Unix socket (`/run/onyx/onyxd.sock`)
+2. Registers itself with its manifest
+3. Receives `ADMIT`/`SUSPEND`/`EVICT` signals from OnyxD
+4. Requests inference from the shared engine (or runs its own)
+5. Reports metrics back to OnyxD
+
+---
+
+### Phase 6: System Configuration
+
+#### [NEW] `/etc/onyx/system.toml`
+
+```toml
+[system]
+hostname = "onyxos"
+tick_rate_hz = 1.0
+demo_mode = false
+
+[hardware]
+platform = "jetson_orin_nano_super"
+ram_total_mb = 8192
+ram_reserved_mb = 1024
+gpu_tops = 67.0
+
+[thermal]
+t_ambient = 25.0
+t_skin_limit = 43.0
+t_throttle = 41.0
+t_emergency = 44.0
+r_thermal = 1.5
+c_thermal = 10.0
+safety_factor = 0.8
+
+[market]
+lambda_power_init = 1.0
+lambda_memory_init = 1.0
+lambda_gpu_init = 1.0
+eta_power = 0.1
+eta_memory = 0.05
+eta_gpu = 0.08
+lambda_min = 0.01
+lambda_max = 100.0
+
+[inference]
+engine = "llama-cpp"
+default_model = "/opt/onyx/models/phi3-mini-4k-q4.gguf"
+n_gpu_layers = 99
+ctx_size = 2048
+
+[network]
+wifi_enabled = true
+ssh_enabled = true
+hud_port = 8080
+```
+
+---
+
+### Phase 7: Build System & Demo
+
+#### [NEW] `build/scripts/build.sh`
+```bash
+# One-command build:
+# 1. Cross-compile onyx-init (Rust → aarch64)
+# 2. Cross-compile onyx_sched.ko (kernel module → aarch64)
+# 3. Build OnyxD (Rust + Cython → aarch64)
+# 4. Build agents (Python → bundle)
+# 5. Buildroot → generate rootfs image
+# 6. Pack into flashable image
+```
+
+#### [NEW] `build/scripts/flash_jetson.sh`
+Flash the custom OnyxOS image to the Jetson Orin Nano.
+
+#### [NEW] `build/scripts/qemu_test.sh`
+Boot OnyxOS in QEMU for testing on dev machine (no GPU, mock thermals).
+
+---
+
+## Boot Sequence
+
+```
+Power On
+   │
+   ▼
+UEFI/BIOS (Jetson bootloader)
+   │
+   ▼
+Linux Kernel 5.15 (stripped, ~5MB)
+   │  - Mount initramfs
+   │  - Load NVIDIA GPU driver
+   │  - Load onyx_sched.ko
+   │
+   ▼
+onyx-init (PID 1) [<500ms]
+   │  - Mount /proc /sys /dev /tmp
+   │  - Set up cgroup v2 hierarchy
+   │  - Configure network
+   │
+   ▼
+OnyxD (the daemon) [<1s]
+   │  - Parse system.toml
+   │  - Initialize thermal governor
+   │  - Initialize power monitor
+   │  - Load inference engine
+   │  - Scan agent manifests
+   │  - Start market ticker
+   │
+   ▼
+Agents come alive
+   │  - Register with OnyxD
+   │  - First auction runs
+   │  - Winners get resources
+   │  - Losers degrade or suspend
+   │
+   ▼
+OnyxOS READY (~3s total boot)
+   │
+   ▼
+HUD available on :8080 or TTY
+```
+
+---
+
+## Execution Priority (YC Demo)
+
+| Priority | What | Where it runs | Why |
+|----------|------|---------------|-----|
+| **P0** | Project structure + config | Dev machine | Foundation |
+| **P0** | `onyx_kernel/` market + thermal + agents | Dev machine (Python) | **The innovation** — demo this |
+| **P0** | `onyx_hud/dashboard.py` | Dev machine (terminal) | **Visible wow-factor** |
+| **P1** | `onyx-init` (Rust PID 1) | QEMU first, then Jetson | Shows it's a real OS |
+| **P1** | `onyx_sched.ko` kernel module | QEMU first, then Jetson | Kernel-level integration |
+| **P2** | OnyxD full Rust daemon | Jetson | Production architecture |
+| **P2** | Buildroot image | Jetson | Flashable OS image |
+| **P3** | Inference engine (Rust) | Jetson (CUDA) | Real LLM on device |
+| **P3** | Demo recording | Jetson | YC video clip |
+
+> [!TIP]
+> **Practical approach:** We build P0 first as pure Python on your Windows dev machine — the market scheduler, agents, and HUD. This is what demos beautifully. Then we layer on the real kernel/init/module work for Jetson deployment.
+
+---
+
+## Full Directory Structure
+
+```
+OnyxOS/
+├── build/                          # Build system
+│   ├── buildroot/                  # Buildroot configs + overlay
+│   ├── kernel/                     # Kernel defconfig + patches
+│   └── scripts/                    # build.sh, flash.sh, qemu.sh
+│
+├── onyx-init/                      # Layer 1: Custom PID 1 (Rust)
+│   ├── Cargo.toml
+│   └── src/main.rs
+│
+├── onyx-sched/                     # Layer 0: Kernel module (C)
+│   ├── Makefile
+│   ├── onyx_sched.c
+│   ├── onyx_sched.h
+│   └── onyx_sched_ioctl.h
+│
+├── onyxd/                          # Layer 2: Central daemon
+│   ├── Cargo.toml                  # Rust components
+│   ├── src/                        # Rust: config, thermal, cgroup, IPC
+│   ├── market/                     # Cython: auction, quant ladder
+│   ├── inference/                  # Inference engine wrapper
+│   └── hud/                        # Rich/Textual dashboard
+│
+├── onyx_kernel/                    # Python-first kernel (dev/demo)
+│   ├── __init__.py
+│   ├── config.py                   # ✅ Already built
+│   ├── agent.py                    # ✅ Already built
+│   ├── market.py                   # Lagrangian auction
+│   ├── thermal_governor.py         # Thermal governor
+│   ├── quant_ladder.py             # Quantization ladder
+│   └── agent_registry.py           # Agent lifecycle
+│
+├── onyx_hud/                       # HUD / Dashboard
+│   ├── __init__.py
+│   └── dashboard.py                # Rich/Textual TUI
+│
+├── agents/                         # Built-in AI agents
+│   ├── base_agent.py
+│   ├── emotion_agent.py
+│   ├── voice_agent.py
+│   ├── world_model_agent.py
+│   └── loop_agent.py
+│
+├── models/                         # GGUF models (gitignored)
+├── docs/                           # Documentation
+│   ├── ARCHITECTURE.md
+│   └── MARKET_ECONOMICS.md
+├── tests/                          # Test suite
+├── scripts/                        # Dev scripts
+│   ├── demo.py                     # One-command demo launcher
+│   └── setup_jetson.sh
+│
+├── Cargo.toml                      # Rust workspace root
+├── pyproject.toml                  # Python project config
+├── .gitignore
+└── README.md
+```
+
+---
+
+## Open Questions
+
+> [!IMPORTANT]
+> 1. **Kernel approach**: For the YC demo, should we show the kernel module actually running on Jetson, or is the Python market simulation + HUD sufficient to prove the concept? (The kernel module adds ~2 weeks of work)
+> 2. **Boot animation**: Want a custom OnyxOS boot splash / logo sequence?
+> 3. **Root filesystem**: Buildroot (simpler, faster) vs Yocto (production-grade, NVIDIA-supported)? I recommend **Buildroot** for the prototype.
+> 4. **Dev environment**: Do you have a Linux machine for cross-compilation, or should we set up WSL2 on your Windows machine?
+
+---
+
+## Verification Plan
+
+### Automated Tests
+```bash
+# Phase P0 — Market scheduler (runs on dev machine)
+python -m pytest tests/test_market.py -v
+python -m pytest tests/test_thermal.py -v
+python -m pytest tests/test_agents.py -v
+python -m pytest tests/test_registry.py -v
+
+# Phase P1 — Rust components
+cargo test --manifest-path onyx-init/Cargo.toml
+cargo test --manifest-path onyxd/Cargo.toml
+
+# Phase P2 — Kernel module (QEMU)
+# Boot QEMU → insmod onyx_sched.ko → verify /dev/onyx_sched exists
+
+# Phase P3 — Integration (Jetson)
+# Flash → boot → verify boot time < 3s → run full agent demo
+```
+
+### Manual Verification
+- Market auction converges to stable prices under varying load
+- Agents properly degrade/evict when thermal pressure increases  
+- HUD renders all panels with real-time data
+- Boot time < 3 seconds on Jetson
+- Total rootfs < 1 GB

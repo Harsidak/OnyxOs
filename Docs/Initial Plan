@@ -1,0 +1,312 @@
+# OnyxOS — AI-Native Operating System for AR Glasses
+
+An AI-first operating system that replaces traditional process scheduling with a **Lagrangian market-based agent economy**, purpose-built for wearable AI hardware (AR glasses) running on the **NVIDIA Jetson Orin Nano Super** (8GB, 67 TOPS, 1024 CUDA cores).
+
+## YC Demo Strategy
+
+> [!IMPORTANT]
+> **The YC pitch is ~60 seconds.** The demo should showcase ONE jaw-dropping moment — not a feature tour.
+>
+> **The "Aha" moment:** Voice a command → OnyxOS's agents compete in real-time for GPU/RAM via a visible market auction → the winning agent runs inference → result is overlaid on a live camera feed — all on a $249 edge device.
+>
+> **Record a 10-15s video clip** rather than doing a live hardware demo on stage.
+
+### What Makes This Innovative (YC Angle)
+1. **No scheduler — a market.** Agents bid for compute using Lagrangian dual prices, not priority queues
+2. **Physics-aware.** Thermal governor + power budget are first-class kernel primitives, not afterthoughts
+3. **Graceful degradation.** Agents self-degrade (quantize models down) when resource prices spike — no OOM kills
+4. **Edge-native.** Full LLM inference on a $249 device, no cloud required
+
+---
+
+## Architecture Overview
+
+```
+┌──────────────────────────────────────────────────┐
+│                   OnyxOS Stack                    │
+├──────────────────────────────────────────────────┤
+│  Layer 4: HUD / AR Overlay          [Python/Web] │
+│  ┌─────────────────────────────────────────────┐ │
+│  │  Heads-Up Display • Notifications • Widgets │ │
+│  └─────────────────────────────────────────────┘ │
+├──────────────────────────────────────────────────┤
+│  Layer 3: Agent Runtime              [Cython]    │
+│  ┌─────────────────────────────────────────────┐ │
+│  │  Agent Registry • Lifecycle Manager         │ │
+│  │  Inter-Agent Comms • Tool/Sensor Bindings   │ │
+│  └─────────────────────────────────────────────┘ │
+├──────────────────────────────────────────────────┤
+│  Layer 2: OnyxKernel (Market Scheduler)          │
+│  ┌──────────────┐ ┌───────────┐ ┌────────────┐ │
+│  │ Thermal Gov  │ │ Lagrangian│ │ Quant      │ │
+│  │ (Power Bdgt) │ │ Auction   │ │ Ladder     │ │
+│  │   [Rust]     │ │  [Cython] │ │ [Cython]   │ │
+│  └──────────────┘ └───────────┘ └────────────┘ │
+├──────────────────────────────────────────────────┤
+│  Layer 1: Inference Engine            [Rust/C++] │
+│  ┌─────────────────────────────────────────────┐ │
+│  │  llama.cpp (CUDA) via llama-cpp-4 crate     │ │
+│  │  Model Pool • GGUF Loader • Token Stream    │ │
+│  └─────────────────────────────────────────────┘ │
+├──────────────────────────────────────────────────┤
+│  Layer 0: Hardware Abstraction        [Rust]     │
+│  ┌─────────────────────────────────────────────┐ │
+│  │  Jetson GPIO/Sensors • Thermal Sensors      │ │
+│  │  Camera (CSI) • Mic • IMU • Power Monitor   │ │
+│  └─────────────────────────────────────────────┘ │
+├──────────────────────────────────────────────────┤
+│  JetPack 6.2+ / L4T Ubuntu 22.04 / CUDA 12.x   │
+│  NVIDIA Jetson Orin Nano Super (8GB / 67 TOPS)  │
+└──────────────────────────────────────────────────┘
+```
+
+---
+
+## Proposed Changes
+
+### Phase 1: Project Scaffolding & Core Types
+
+#### [NEW] Project root structure
+
+```
+OnyxOS/
+├── Cargo.toml                    # Rust workspace root
+├── pyproject.toml                # Cython/Python build config
+├── onyx_kernel/                  # Cython — Market scheduler + Agent runtime
+│   ├── __init__.py
+│   ├── market.pyx                # Lagrangian auction engine
+│   ├── thermal_governor.pyx      # Power budget / thermal control
+│   ├── quant_ladder.pyx          # Model quantization ladder
+│   ├── agent.py                  # Agent ITD (Inference Task Descriptor)
+│   ├── agent_registry.py         # Agent lifecycle management
+│   └── config.py                 # System constants (hardware params)
+├── onyx_inference/               # Rust — Inference engine
+│   ├── Cargo.toml
+│   └── src/
+│       ├── lib.rs                # Library root + PyO3 bindings
+│       ├── engine.rs             # llama.cpp wrapper (llama-cpp-4)
+│       ├── model_pool.rs         # Model loading / GGUF management
+│       └── stream.rs             # Token streaming interface
+├── onyx_hal/                     # Rust — Hardware Abstraction Layer
+│   ├── Cargo.toml
+│   └── src/
+│       ├── lib.rs
+│       ├── thermal.rs            # Jetson thermal zone reader
+│       ├── power.rs              # INA3221 power monitor
+│       └── camera.rs             # CSI camera capture
+├── onyx_hud/                     # Python — AR Overlay / Terminal UI
+│   ├── __init__.py
+│   ├── dashboard.py              # Rich/Textual TUI for demo
+│   └── overlay.py                # Future: AR glass overlay
+├── agents/                       # Built-in agents
+│   ├── emotion_agent.py          # RT_HARD — Emotion detection
+│   ├── voice_agent.py            # RT_SOFT — Voice NLU + TTS
+│   ├── world_model_agent.py      # RT_SOFT — Spatial awareness
+│   └── loop_agent.py             # BG — Background reasoning
+├── models/                       # GGUF model files (gitignored)
+│   └── .gitkeep
+├── scripts/
+│   ├── setup_jetson.sh           # Jetson setup automation
+│   └── demo.sh                   # One-command YC demo launcher
+├── docs/
+│   ├── ARCHITECTURE.md           # This plan, refined
+│   └── MARKET_ECONOMICS.md       # The math behind the auction
+├── demo/
+│   └── demo_recorder.py          # Screen recorder for YC clip
+├── tests/
+│   ├── test_market.py
+│   ├── test_thermal.py
+│   └── test_inference.py
+└── README.md
+```
+
+---
+
+### Phase 2: OnyxKernel — The Market Scheduler (Cython)
+
+This is the heart of OnyxOS — evolving your existing `onyx_market_sim.py` into a production Cython kernel.
+
+#### [NEW] `onyx_kernel/config.py`
+- Hardware constants for Jetson Orin Nano Super
+  - `T_LIMIT = 43.0°C` (skin-contact limit for glasses)
+  - `T_AMB = 25.0°C` (ambient)
+  - `R_TH`, `C_TH` — thermal resistance/capacitance
+  - `M_RAM = 8192` MB, `GPU_TOPS = 67`
+  - `P_BUDGET_RANGE = (7, 25)` watts
+
+#### [NEW] `onyx_kernel/agent.py`
+- `AgentITD` class (evolved from your sim):
+  - Priority classes: `RT_HARD`, `RT_SOFT`, `BG`
+  - Utility function: `U(q) = U_base * q^α` (configurable α)
+  - Memory footprint: `M(q) = M_base * q`
+  - Cost function incorporating both power (`λ_P * ε`) and memory (`λ_M * M(q)`)
+  - State: `RUNNING`, `SUSPENDED`, `DEGRADED`, `EVICTED`
+
+#### [NEW] `onyx_kernel/market.pyx` (Cython for speed)
+- `LagrangianAuction` class:
+  - Dual variables: `λ_P` (power price), `λ_M` (memory price), `λ_G` (GPU price)
+  - `run_auction(agents, budgets)` → admission decisions
+  - Dual ascent with configurable learning rates
+  - Hard constraint enforcement for `RT_HARD` agents
+  - Convergence detection + price dampening
+
+#### [NEW] `onyx_kernel/thermal_governor.pyx` (Cython)
+- Reads real Jetson thermal zones via `/sys/devices/virtual/thermal/`
+- Publishes dynamic power budget: `P = P_sus + α * C_th * (T_limit - T_current) / H`
+- Emergency throttle if `T > T_LIMIT - 2°C`
+- Feeds budget into the Lagrangian auction as the power constraint
+
+#### [NEW] `onyx_kernel/quant_ladder.pyx` (Cython)
+- Quantization levels: `FP16 → INT8 → INT4 → INT2` (each with utility/memory tradeoffs)
+- Agents query the ladder to find optimal quantization given current `λ_M`
+- Automatic degradation: agents voluntarily downshift when memory prices spike
+
+#### [NEW] `onyx_kernel/agent_registry.py`
+- Agent lifecycle: `REGISTER → READY → RUNNING → SUSPENDED → EVICTED`
+- Hot-loading agents at runtime
+- Inter-agent message bus (simple pub/sub)
+
+---
+
+### Phase 3: Inference Engine (Rust + PyO3)
+
+#### [NEW] `onyx_inference/` Rust crate
+- **`engine.rs`**: Wraps `llama-cpp-4` crate with CUDA feature flag
+  - `InferenceEngine::new(model_path, n_gpu_layers, ctx_size)`
+  - `InferenceEngine::infer(prompt, max_tokens)` → token stream
+  - Supports streaming callbacks for real-time HUD updates
+- **`model_pool.rs`**: Manages loaded GGUF models
+  - Load/unload models based on agent demand
+  - Memory tracking per model (feeds back into market)
+- **`stream.rs`**: Async token streaming channel
+  - `TokenStream` pushable to Python via PyO3
+- **PyO3 bindings**: Expose `InferenceEngine` to Python/Cython
+
+#### `Cargo.toml` dependencies:
+```toml
+[dependencies]
+llama-cpp-4 = { version = "0.1", features = ["cuda"] }
+pyo3 = { version = "0.22", features = ["extension-module"] }
+tokio = { version = "1", features = ["rt-multi-thread"] }
+```
+
+---
+
+### Phase 4: Hardware Abstraction Layer (Rust)
+
+#### [NEW] `onyx_hal/` Rust crate
+- **`thermal.rs`**: Read Jetson thermal zones
+  - Parse `/sys/devices/virtual/thermal/thermal_zone*/temp`
+  - Expose `get_cpu_temp()`, `get_gpu_temp()`, `get_soc_temp()`
+- **`power.rs`**: Read INA3221 power monitor
+  - Parse `/sys/bus/i2c/drivers/ina3221/*/hwmon/*/`
+  - Expose `get_power_draw_mw()`, `get_voltage_mv()`
+- **`camera.rs`**: CSI camera capture (future - use OpenCV for now)
+- PyO3 bindings for all HAL functions
+
+---
+
+### Phase 5: Demo HUD (Python TUI)
+
+#### [NEW] `onyx_hud/dashboard.py`
+- Built with **Rich** + **Textual** for a stunning terminal UI
+- Real-time panels:
+  - 🌡️ **Thermal Gauge**: Live temperature with color gradient
+  - 💰 **Market Prices**: `λ_P`, `λ_M`, `λ_G` with sparkline history
+  - 🤖 **Agent Status Board**: Each agent's state, utility, cost, quantization level
+  - ⚡ **Power Budget**: Budget vs. actual draw, with thermal headroom
+  - 📊 **Auction Log**: Real-time bid/win/evict events
+  - 💬 **Inference Stream**: Live token output from the winning agent
+
+---
+
+### Phase 6: Built-in Agents
+
+#### [NEW] `agents/emotion_agent.py` (RT_HARD)
+- Captures camera frame → runs emotion classifier
+- Cannot be degraded or evicted (rigid constraint)
+- Utility: 100 | Power: 5W | RAM: 1GB
+
+#### [NEW] `agents/voice_agent.py` (RT_SOFT)
+- Wake word detection → NLU → LLM inference → TTS
+- Can be degraded but not evicted during active conversation
+- Utility: 80 | Power: 8W | RAM: 1.5GB
+
+#### [NEW] `agents/world_model_agent.py` (RT_SOFT)
+- Spatial awareness, object detection
+- Can degrade to lower-res model when memory price spikes
+- Utility: 70 | Power: 15W | RAM: 2GB
+
+#### [NEW] `agents/loop_agent.py` (BG)
+- Background reasoning, memory consolidation
+- First to be evicted when resources are scarce
+- Utility: 30 | Power: 8W | RAM: 1.5GB
+
+---
+
+### Phase 7: Demo Script & Jetson Setup
+
+#### [NEW] `scripts/setup_jetson.sh`
+- Install JetPack 6.2+ dependencies
+- Install Rust toolchain + llama-cpp-4
+- Install Python deps (Cython, Rich, Textual)
+- Download Q4_K_M quantized models
+- Enable `jetson_clocks` + MAXN SUPER mode
+
+#### [NEW] `scripts/demo.sh`
+- One-command launch: `./demo.sh`
+- Starts thermal monitor → inference engine → market scheduler → agents → HUD
+- Records 15s demo clip for YC pitch
+
+---
+
+## Build Order (Execution Priority for YC Demo)
+
+| Priority | Component | Why |
+|----------|-----------|-----|
+| **P0** | Project scaffolding + config | Foundation |
+| **P0** | `onyx_kernel/` (market.pyx, agent.py, thermal_governor.pyx) | **This IS the innovation** |
+| **P1** | `onyx_hud/dashboard.py` (Rich TUI) | **Visible wow-factor for demo** |
+| **P1** | `agents/` (emotion, voice, world_model, loop) | Show agents competing |
+| **P2** | `onyx_inference/` (Rust) | Can stub with Python `llama-cpp-python` first |
+| **P2** | `onyx_hal/` (Rust) | Can use mock data on dev machine |
+| **P3** | Jetson deployment + demo recording | Final polish |
+
+> [!TIP]
+> **For the YC demo, we can start with a Python-only prototype** that demonstrates the market scheduler + HUD beautifully, then port the inference engine to Rust later. The Cython kernel and TUI dashboard are what will blow people's minds on stage.
+
+---
+
+## Open Questions
+
+> [!IMPORTANT]
+> 1. **Model choice**: Which GGUF model do you want for the demo? (e.g., `Phi-3-mini-4k` at ~2.3GB Q4, `TinyLlama-1.1B` at ~700MB Q4, or `Qwen2.5-1.5B`?)
+> 2. **Camera input**: Do you already have a CSI camera for the Jetson, or should we use webcam/mock data for the prototype?
+> 3. **Voice**: Do you want Whisper-based voice input for the demo, or text-based commands are fine for now?
+> 4. **Branding**: Should the HUD have "OnyxOS" branding with a specific color scheme / logo you have in mind?
+
+---
+
+## Verification Plan
+
+### Automated Tests
+```bash
+# Market scheduler correctness
+python -m pytest tests/test_market.py -v
+
+# Thermal governor boundary conditions
+python -m pytest tests/test_thermal.py -v
+
+# Inference engine smoke test (requires CUDA)
+cargo test --manifest-path onyx_inference/Cargo.toml
+
+# Full integration test
+python -m pytest tests/test_integration.py -v
+```
+
+### Manual Verification
+- Run the full demo on the development machine with mocked hardware data
+- Verify HUD renders all panels with live updating data
+- Confirm agents properly compete, degrade, and get evicted based on market prices
+- Run on Jetson Orin Nano Super to validate real thermal/power readings
+- Record 15s demo clip with screen capture

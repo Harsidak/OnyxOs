@@ -1,0 +1,14 @@
+[package]
+name = "onyx-init"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "OnyxOS PID 1 — Custom init replacing systemd"
+
+[[bin]]
+name = "onyx-init"
+path = "src/main.rs"
+
+[dependencies]
+nix = { version = "0.29", features = ["mount", "signal", "process", "fs"] }
